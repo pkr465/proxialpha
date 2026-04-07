@@ -1,0 +1,97 @@
+# ============================================================
+# TRADING CONFIGURATION
+# ProxiAlpha - Execution, Risk, and Portfolio Rules
+# Controls how orders are placed, risk managed, and capital allocated.
+# ============================================================
+
+# ---- PORTFOLIO SETTINGS ----
+portfolio:
+  initial_capital: 100000          # Starting capital ($)
+  currency: "USD"
+  max_positions: 10                # Maximum concurrent positions
+  cash_reserve_pct: 0.05          # Always keep 5% in cash
+  rebalance_frequency: "monthly"  # monthly, weekly, or none
+
+# ---- POSITION SIZING ----
+position_sizing:
+  method: "risk_based"             # fixed, risk_based, kelly, or equal_weight
+  fixed_size_pct: 0.05            # 5% per position (if method=fixed)
+  max_position_pct: 0.10          # Never exceed 10% in single position
+  min_position_usd: 100           # Minimum $100 per trade
+  risk_per_trade_pct: 0.02        # Risk 2% of portfolio per trade (if risk_based)
+  kelly_fraction: 0.25            # Use 25% Kelly criterion (conservative)
+
+# ---- RISK MANAGEMENT ----
+risk:
+  # Stop losses
+  default_stop_loss_pct: 0.08     # 8% trailing stop
+  atr_stop_multiplier: 1.5       # ATR-based stop: 1.5x ATR below entry
+  use_trailing_stop: true
+  trailing_stop_activation: 0.10  # Activate trailing after 10% gain
+
+  # Take profit
+  default_take_profit_pct: 0.25   # 25% take profit
+  partial_exits:                  # Scale out of positions
+    - at_pct: 0.15                # At 15% gain
+      sell_pct: 0.33              # Sell 33% of position
+    - at_pct: 0.25                # At 25% gain
+      sell_pct: 0.33              # Sell another 33%
+    - at_pct: 0.50                # At 50% gain
+      sell_pct: 0.34              # Sell remaining 34%
+
+  # Portfolio-level risk
+  max_portfolio_drawdown_pct: 0.15  # Halt all new buys if portfolio down 15%
+  max_daily_loss_pct: 0.05        # Stop trading if down 5% in a day
+  max_sector_exposure_pct: 0.30   # Max 30% in any single sector
+  max_correlation: 0.80           # Avoid positions with >80% correlation
+
+  # Volatility filters
+  min_atr_pct: 0.01               # Skip stocks with ATR < 1% (too quiet)
+  max_atr_pct: 0.10               # Skip stocks with ATR > 10% (too volatile)
+  volatility_scale_down: true     # Reduce position size in high-vol environments
+
+# ---- ORDER EXECUTION ----
+execution:
+  broker: "alpaca"                 # alpaca, interactive_brokers, or paper
+  mode: "paper"                    # paper or live
+  order_type: "market"             # market, limit, or adaptive
+  limit_offset_pct: 0.001        # Limit price = market - 0.1% (for limit orders)
+  time_in_force: "day"            # day, gtc, ioc
+  max_daily_trades: 10            # Safety limit
+  max_slippage_pct: 0.005         # Max 0.5% slippage tolerance
+  commission_per_trade: 0.00      # Alpaca = $0 commission
+
+  # Bracket orders (entry + stop + target)
+  use_bracket_orders: true
+  bracket_stop_type: "stop"       # stop or stop_limit
+  bracket_limit_offset: 0.002    # Limit offset for stop-limit orders
+
+# ---- SCHEDULING ----
+schedule:
+  scan_frequency: "1h"            # How often to scan for signals
+  trading_hours:                  # Only trade during these hours (ET)
+    start: "09:35"                # 5 min after market open
+    end: "15:55"                  # 5 min before market close
+  pre_market_scan: true           # Run scan before market opens
+  after_hours_trading: false      # Don't trade after hours
+  weekend_analysis: true          # Run analysis on weekends (no execution)
+
+# ---- PAPER TRADING ----
+paper_trading:
+  state_file: "data/paper_trading_state.json"
+  auto_execute: false             # Require confirmation for paper trades
+  track_slippage: true            # Simulate realistic slippage
+  simulated_slippage_pct: 0.001  # 0.1% simulated slippage
+  simulated_fill_delay_sec: 1    # 1 second fill delay
+
+# ---- BACKTESTING ----
+backtesting:
+  lookback_years: 3               # How many years of history to test
+  benchmark: "SPY"                # Compare performance to S&P 500
+  walk_forward:
+    enabled: true
+    train_months: 12              # Train on 12 months
+    test_months: 3                # Test on 3 months
+    step_months: 3                # Slide window by 3 months
+  transaction_costs: true         # Include commission + slippage
+  rebalance_on: "signal"          # signal, daily, weekly, or monthly

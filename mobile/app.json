@@ -1,0 +1,24 @@
+{
+  "expo": {
+    "name": "ProxiAlpha",
+    "slug": "proxialpha",
+    "version": "2.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "backgroundColor": "#0a0e17"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "ai.proxiant.proxialpha"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#0a0e17"
+      },
+      "package": "ai.proxiant.proxialpha"
+    }
+  }
+}

@@ -1,0 +1,172 @@
+# ============================================================
+# STRATEGY CONFIGURATION
+# ProxiAlpha - Strategy Parameters
+# Each strategy can be independently enabled, weighted, and tuned.
+# Claude AI can modify these at runtime via the API.
+# ============================================================
+
+strategies:
+  # --- DIP BUYER STRATEGY ---
+  # Buys stocks at fixed pullback levels from all-time highs
+  dip_buyer:
+    enabled: true
+    weight: 1.2                    # Higher weight = more influence in consensus
+    parameters:
+      dip_levels:                  # Buy when drawdown from ATH hits these levels
+        - 0.30                     # 30% pullback - light entry
+        - 0.50                     # 50% pullback - medium entry
+        - 0.60                     # 60% pullback - heavy entry
+        - 0.70                     # 70% pullback - max conviction
+      recovery_targets:            # Sell when recovery from low reaches these
+        - 0.25                     # 25% recovery - first trim
+        - 0.50                     # 50% recovery - half position
+        - 0.75                     # 75% recovery - scale out
+        - 1.00                     # 100% recovery (back to ATH) - full exit
+      stop_loss_pct: 0.08         # 8% stop loss from entry
+      min_volume_ratio: 0.8       # Minimum volume vs 20-day average
+      max_position_pct: 0.10      # Max 10% of portfolio per position
+
+  # --- TECHNICAL INDICATORS STRATEGY ---
+  # RSI, MACD, Moving Averages, Bollinger Bands scoring system
+  technical:
+    enabled: true
+    weight: 1.0
+    parameters:
+      rsi:
+        period: 14
+        oversold: 30               # RSI below this = bullish signal (+3 pts)
+        overbought: 70             # RSI above this = bearish signal (+3 pts)
+      macd:
+        fast_period: 12
+        slow_period: 26
+        signal_period: 9
+        crossover_weight: 3        # Points for bullish/bearish crossover
+      moving_averages:
+        sma_short: 20
+        sma_long: 50
+        sma_very_long: 200
+        golden_cross_weight: 3     # Points for SMA20 crossing above SMA50
+        death_cross_weight: 3      # Points for SMA20 crossing below SMA50
+      bollinger_bands:
+        period: 20
+        std_dev: 2
+        touch_weight: 2            # Points for touching upper/lower band
+      volume:
+        avg_period: 20
+        high_volume_threshold: 1.5 # Volume ratio considered "high"
+        confirmation_weight: 1     # Extra point when volume confirms signal
+      signal_thresholds:
+        strong_buy: 8              # Net score >= 8 = STRONG_BUY
+        buy: 5                     # Net score >= 5 = BUY
+        sell: -5                   # Net score <= -5 = SELL
+        strong_sell: -8            # Net score <= -8 = STRONG_SELL
+      stop_loss_multiplier: 1.5    # ATR multiplier for stop loss
+      target_multiplier: 3.0       # ATR multiplier for take profit
+
+  # --- DOLLAR COST AVERAGING STRATEGY ---
+  # Gradually accumulates positions in pulled-back stocks
+  dca:
+    enabled: true
+    weight: 0.8
+    parameters:
+      num_tranches: 5              # Total number of buy tranches per stock
+      min_drawdown_to_start: 0.30  # Only start DCA when 30%+ drawdown
+      tranche_interval_days: 7     # Buy every 7 days
+      tranche_size_pct: 0.02      # 2% of portfolio per tranche
+      scale_with_drawdown: true    # Larger buys at deeper drawdowns
+      target_recovery_pct: 0.75   # Target: 75% recovery from low
+      max_total_allocation: 0.10  # Max 10% total per stock across all tranches
+
+  # --- CUSTOM RULES STRATEGY ---
+  # User-definable rule engine (JSON rules, Claude-modifiable)
+  custom_rules:
+    enabled: true
+    weight: 0.9
+    rules:
+      - name: "Oversold Bounce"
+        description: "Buy when RSI oversold + MACD turning bullish + above-avg volume"
+        conditions:
+          - indicator: RSI
+            operator: "<"
+            value: 30
+          - indicator: MACD_Hist
+            operator: ">"
+            value: 0
+          - indicator: Vol_Ratio
+            operator: ">"
+            value: 1.2
+        action: BUY
+        confidence: 0.75
+        position_size: 0.05
+        stop_loss_pct: 0.08
+        target_pct: 0.20
+
+      - name: "Death Cross Exit"
+        description: "Sell when SMA20 crosses below SMA50 and RSI not oversold"
+        conditions:
+          - indicator: SMA_20
+            operator: "<"
+            value_ref: SMA_50
+          - indicator: RSI
+            operator: ">"
+            value: 50
+        action: SELL
+        confidence: 0.70
+
+      - name: "Bollinger Squeeze Buy"
+        description: "Buy when price touches lower Bollinger Band with low RSI"
+        conditions:
+          - indicator: Close
+            operator: "<="
+            value_ref: BB_Lower
+          - indicator: RSI
+            operator: "<"
+            value: 40
+        action: BUY
+        confidence: 0.65
+        position_size: 0.04
+        stop_loss_pct: 0.06
+        target_pct: 0.15
+
+      - name: "Volume Spike Recovery"
+        description: "Buy on high volume after significant drawdown"
+        conditions:
+          - indicator: Vol_Ratio
+            operator: ">"
+            value: 2.0
+          - indicator: Drawdown_Pct
+            operator: "<"
+            value: -0.40
+          - indicator: MACD_Hist
+            operator: ">"
+            value: 0
+        action: STRONG_BUY
+        confidence: 0.80
+        position_size: 0.06
+        stop_loss_pct: 0.10
+        target_pct: 0.30
+
+  # --- AI / CLAUDE STRATEGY ---
+  # Plugin interface for Claude API integration
+  ai_claude:
+    enabled: false                 # Enable when API key is set
+    weight: 1.5                    # High weight - AI has broad context
+    parameters:
+      model: "claude-sonnet-4-6"
+      api_key: null                # Set your Anthropic API key
+      use_api: false               # Toggle live API calls
+      fallback_to_rules: true      # Use rule-based fallback if API fails
+      max_tokens: 1024
+      call_frequency: "daily"      # How often to query Claude
+      system_prompt: |
+        You are a quantitative trading analyst. Analyze the provided stock data
+        and generate precise trading signals. Consider: technical indicators,
+        pullback depth, volume, sector momentum, risk/reward ratio, and
+        portfolio diversification. Respond with JSON signals.
+
+# --- CONSENSUS ENGINE ---
+consensus:
+  min_confidence: 0.50             # Minimum confidence to act on consensus
+  min_strategies_agree: 2          # At least N strategies must agree
+  position_sizing: "kelly"         # kelly, fixed, or proportional
+  kelly_fraction: 0.25             # Use 25% Kelly for safety

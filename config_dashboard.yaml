@@ -1,0 +1,113 @@
+# ============================================================
+# DASHBOARD CONFIGURATION
+# ProxiAlpha - React Dashboard # Auto Trading Platform - React Dashboard & Visualization Visualization
+# Controls charts, layouts, themes, and data refresh rates.
+# ============================================================
+
+# ---- GENERAL SETTINGS ----
+dashboard:
+  title: "ProxiAlpha"
+  theme: "dark"                    # dark or light
+  refresh_interval_sec: 60        # Auto-refresh data every 60s
+  default_view: "overview"        # overview, watchlist, positions, backtest
+  port: 3000                       # React dev server port
+
+# ---- PAGES / VIEWS ----
+views:
+  overview:
+    title: "Portfolio Overview"
+    widgets:
+      - type: "equity_curve"
+        title: "Portfolio Value"
+        height: 400
+        show_benchmark: true       # Overlay SPY performance
+      - type: "positions_table"
+        title: "Open Positions"
+        columns: ["ticker", "shares", "avg_cost", "current_price", "pnl", "pnl_pct"]
+      - type: "signals_feed"
+        title: "Latest Signals"
+        max_items: 20
+      - type: "performance_cards"
+        title: "Key Metrics"
+        metrics: ["total_return", "sharpe", "win_rate", "max_drawdown"]
+
+  watchlist:
+    title: "Pullback Watchlist"
+    widgets:
+      - type: "pullback_heatmap"
+        title: "Drawdown Heatmap"
+        color_scale: "RdYlGn_r"   # Red = deep drawdown, Green = recovered
+        metric: "drawdown_pct"
+      - type: "stock_table"
+        title: "Watchlist Details"
+        columns: ["ticker", "sector", "ath", "low", "current", "drawdown%", "recovery%", "rsi", "signal"]
+        sortable: true
+        filterable: true
+      - type: "sector_allocation"
+        title: "Sector Breakdown"
+        chart_type: "pie"
+
+  analysis:
+    title: "Technical Analysis"
+    widgets:
+      - type: "candlestick"
+        title: "Price Chart"
+        overlays: ["SMA_20", "SMA_50", "BB_Upper", "BB_Lower"]
+        indicators_below: ["RSI", "MACD", "Volume"]
+        height: 500
+      - type: "indicator_panel"
+        title: "Technical Scores"
+        show_bull_bear: true
+      - type: "correlation_matrix"
+        title: "Stock Correlations"
+
+  backtest:
+    title: "Backtesting"
+    widgets:
+      - type: "equity_curve"
+        title: "Backtest Equity Curve"
+        show_drawdown: true
+      - type: "metrics_table"
+        title: "Performance Metrics"
+      - type: "trade_log"
+        title: "Trade History"
+        columns: ["date", "ticker", "action", "shares", "price", "pnl"]
+      - type: "monthly_returns"
+        title: "Monthly Returns Heatmap"
+        chart_type: "heatmap"
+
+  ai_panel:
+    title: "Claude AI Panel"
+    widgets:
+      - type: "ai_signals"
+        title: "AI-Generated Signals"
+      - type: "strategy_config"
+        title: "Strategy Parameters"
+        editable: true             # Allow editing from dashboard
+      - type: "ai_chat"
+        title: "Ask Claude"
+        placeholder: "Ask about a stock, strategy, or market analysis..."
+
+# ---- CHART SETTINGS ----
+charts:
+  default_library: "recharts"      # recharts for React, plotly for Python
+  color_scheme:
+    positive: "#22c55e"            # Green for gains
+    negative: "#ef4444"            # Red for losses
+    neutral: "#6b7280"             # Gray for flat
+    primary: "#3b82f6"             # Blue for primary data
+    secondary: "#a855f7"           # Purple for secondary
+    background: "#111827"          # Dark background
+    card_bg: "#1f2937"
+    text: "#f9fafb"
+  candlestick:
+    up_color: "#22c55e"
+    down_color: "#ef4444"
+    wick_color: "#9ca3af"
+
+# ---- DATA SOURCES FOR DASHBOARD ----
+data_sources:
+  prices: "yfinance"               # yfinance, alpaca, or polygon
+  indicators: "calculated"         # calculated from prices
+  portfolio: "paper_trading_state" # paper_trading_state.json
+  backtest: "backtest_results"     # Saved backtest results

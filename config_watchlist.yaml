@@ -1,0 +1,264 @@
+# ============================================================
+# WATCHLIST CONFIGURATION
+# ProxiAlpha - Stock Universe
+# Each stock includes sector, price levels, and notes.
+# Claude AI can add/remove stocks dynamically.
+# ============================================================
+
+watchlist:
+  # ---- CRYPTO / FINTECH SECTOR ----
+  COIN:
+    company: "Coinbase Global"
+    sector: "Crypto/Fintech"
+    all_time_high: 443
+    pullback_low: 138
+    drawdown_pct: 68.8
+    thesis: "Leading US crypto exchange. Benefits from crypto adoption + ETF inflows."
+    risk_factors:
+      - "Regulatory uncertainty (SEC actions)"
+      - "Revenue tied to crypto volume (cyclical)"
+      - "Competition from DEXs and global exchanges"
+    catalysts:
+      - "Crypto bull market / BTC halving effects"
+      - "International expansion"
+      - "Base L2 network growth"
+
+  HOOD:
+    company: "Robinhood Markets"
+    sector: "Crypto/Fintech"
+    all_time_high: 153
+    pullback_low: 63
+    drawdown_pct: 58.8
+    thesis: "Gen-Z brokerage with crypto + options. Growing revenue diversification."
+    risk_factors:
+      - "Dependence on transaction revenue"
+      - "Regulatory risk on payment for order flow"
+    catalysts:
+      - "Crypto trading revenue growth"
+      - "Gold subscription expansion"
+      - "International expansion to UK/EU"
+
+  # ---- TECHNOLOGY SECTOR ----
+  ORCL:
+    company: "Oracle Corporation"
+    sector: "Tech/Cloud"
+    all_time_high: 345
+    pullback_low: 136
+    drawdown_pct: 60.6
+    thesis: "Cloud infrastructure and AI database play. Enterprise moat."
+    risk_factors:
+      - "AWS/Azure competition"
+      - "Slower organic growth vs hyperscalers"
+    catalysts:
+      - "AI workload migration to OCI"
+      - "Multi-cloud partnerships"
+      - "Healthcare IT (Cerner integration)"
+
+  MSTR:
+    company: "MicroStrategy (Strategy)"
+    sector: "Crypto/Tech"
+    all_time_high: 543
+    pullback_low: 105
+    drawdown_pct: 80.7
+    thesis: "Bitcoin treasury company. Leveraged BTC play."
+    risk_factors:
+      - "Extreme BTC correlation and leverage"
+      - "Convertible debt structure"
+      - "Premium to NAV can compress"
+    catalysts:
+      - "BTC price appreciation"
+      - "S&P 500 / index inclusion"
+      - "Bitcoin yield strategy"
+
+  NOW:
+    company: "ServiceNow"
+    sector: "Tech/SaaS"
+    all_time_high: 239
+    pullback_low: 98
+    drawdown_pct: 59.0
+    thesis: "Enterprise workflow automation leader. AI integration moat."
+    risk_factors:
+      - "High valuation multiples"
+      - "Enterprise spending slowdown risk"
+    catalysts:
+      - "AI-powered workflow automation"
+      - "Federal/government contracts"
+      - "Platform expansion beyond ITSM"
+
+  # ---- CRYPTO SECTOR ----
+  ETH:
+    company: "Ethereum"
+    sector: "Crypto"
+    all_time_high: 4956
+    pullback_low: 1795
+    drawdown_pct: 63.8
+    thesis: "Smart contract platform. DeFi + NFT infrastructure layer."
+    risk_factors:
+      - "Layer 2 value extraction"
+      - "Regulatory classification risk"
+      - "Solana/alt-L1 competition"
+    catalysts:
+      - "ETH ETF flows"
+      - "Layer 2 ecosystem growth"
+      - "Staking yield (~4-5%)"
+    notes: "Trade via ETH-USD on crypto exchanges, not Alpaca equities"
+
+  IREN:
+    company: "IREN Limited"
+    sector: "Crypto/Mining"
+    all_time_high: 76
+    pullback_low: 30
+    drawdown_pct: 60.5
+    thesis: "Bitcoin miner with AI/HPC pivot. Data center optionality."
+    risk_factors:
+      - "BTC price dependency"
+      - "Energy cost volatility"
+      - "Dilution risk"
+    catalysts:
+      - "AI/HPC data center revenue"
+      - "BTC halving supply squeeze"
+
+  # ---- FINTECH SECTOR ----
+  SOFI:
+    company: "SoFi Technologies"
+    sector: "Fintech"
+    all_time_high: 32
+    pullback_low: 15
+    drawdown_pct: 53.1
+    thesis: "Digital bank + lending + investing platform. Full financial ecosystem."
+    risk_factors:
+      - "Credit quality in recession"
+      - "Intense banking competition"
+    catalysts:
+      - "Bank charter leverage"
+      - "Galileo/Technisys fintech platform"
+      - "Member growth trajectory"
+
+  # ---- HEALTHCARE SECTOR ----
+  HIMS:
+    company: "Hims & Hers Health"
+    sector: "Healthcare/Telehealth"
+    all_time_high: 72
+    pullback_low: 13
+    drawdown_pct: 81.9
+    thesis: "DTC telehealth for men and women. Subscription model."
+    risk_factors:
+      - "Compounded GLP-1 regulatory risk"
+      - "Competition from established pharma"
+      - "Customer acquisition costs"
+    catalysts:
+      - "Weight loss platform expansion"
+      - "International markets"
+      - "Subscription revenue growth"
+
+  NVO:
+    company: "Novo Nordisk"
+    sector: "Healthcare/Pharma"
+    all_time_high: 148
+    pullback_low: 36
+    drawdown_pct: 75.7
+    thesis: "GLP-1 leader (Ozempic, Wegovy). Obesity mega-trend."
+    risk_factors:
+      - "Pricing pressure from competition"
+      - "Supply constraints"
+      - "Eli Lilly competitive threat"
+    catalysts:
+      - "Obesity market TAM expansion"
+      - "Next-gen oral GLP-1s"
+      - "CagriSema clinical data"
+
+  UNH:
+    company: "UnitedHealth Group"
+    sector: "Healthcare/Insurance"
+    all_time_high: 632
+    pullback_low: 234
+    drawdown_pct: 63.0
+    thesis: "Largest US health insurer + Optum services. Defensive + growth."
+    risk_factors:
+      - "Regulatory/political risk (single payer)"
+      - "Medical cost ratio pressure"
+      - "DOJ investigations"
+    catalysts:
+      - "Optum Health vertical integration"
+      - "Medicare Advantage growth"
+      - "AI in healthcare cost reduction"
+
+  # ---- CONSUMER / RETAIL SECTOR ----
+  NKE:
+    company: "Nike Inc"
+    sector: "Consumer/Retail"
+    all_time_high: 179
+    pullback_low: 44
+    drawdown_pct: 75.4
+    thesis: "Global athletic brand. DTC transformation + innovation cycle."
+    risk_factors:
+      - "Consumer spending slowdown"
+      - "Inventory management issues"
+      - "Competition from On, Hoka, New Balance"
+    catalysts:
+      - "New CEO turnaround plan"
+      - "Innovation pipeline (Air Max, Jordan)"
+      - "China recovery"
+
+  TGT:
+    company: "Target Corporation"
+    sector: "Consumer/Retail"
+    all_time_high: 269
+    pullback_low: 83
+    drawdown_pct: 69.1
+    thesis: "Mass-market retailer with strong private labels and store base."
+    risk_factors:
+      - "Consumer trade-down to Walmart/dollar stores"
+      - "Shrinkage/theft issues"
+      - "Discretionary spending mix headwind"
+    catalysts:
+      - "Same-store sales recovery"
+      - "Private label margin expansion"
+      - "Digital fulfillment efficiency"
+
+  EL:
+    company: "Estée Lauder"
+    sector: "Consumer/Beauty"
+    all_time_high: 373
+    pullback_low: 69
+    drawdown_pct: 81.5
+    thesis: "Premium beauty/skincare conglomerate. Travel retail recovery."
+    risk_factors:
+      - "China/Hainan travel retail weakness"
+      - "Competitive pressure from indie brands"
+      - "Inventory destocking cycle"
+    catalysts:
+      - "China consumer recovery"
+      - "Travel retail rebound"
+      - "Skincare innovation cycle"
+
+  LULU:
+    company: "Lululemon Athletica"
+    sector: "Consumer/Retail"
+    all_time_high: 516
+    pullback_low: 143
+    drawdown_pct: 72.3
+    thesis: "Premium athletic apparel. Strong brand loyalty + international growth."
+    risk_factors:
+      - "Slowing North America growth"
+      - "Premium pricing pressure"
+      - "Competition intensifying"
+    catalysts:
+      - "International expansion (China, EU)"
+      - "Men's category growth"
+      - "Footwear launch trajectory"
+
+# ---- SECTOR ALLOCATION LIMITS ----
+sector_limits:
+  "Crypto/Fintech": 0.25          # Max 25% portfolio in crypto/fintech
+  "Tech": 0.20
+  "Healthcare": 0.20
+  "Consumer/Retail": 0.20
+  "Crypto": 0.15                   # Pure crypto max 15%
+
+# ---- WATCHLIST MANAGEMENT ----
+auto_scan:
+  enabled: true
+  frequency: "daily"               # daily, hourly, or realtime
+  add_threshold: 0.40             # Auto-add stocks with 40%+ drawdown
+  remove_threshold: 0.10          # Remove if drawdown < 10% (recovered)

@@ -1,0 +1,175 @@
+# ============================================================
+# AI / CLAUDE INTEGRATION CONFIGURATION
+# ProxiAlpha - How Claude plugs into the system
+# Defines API settings, prompt templates, and automation hooks.
+# ============================================================
+
+# ---- ANTHROPIC API SETTINGS ----
+anthropic:
+  api_key: null                    # Your Anthropic API key (set via env var ANTHROPIC_API_KEY)
+  model: "claude-sonnet-4-6"        # Primary model for signal generation
+  model_analysis: "claude-opus-4-6" # Deeper model for weekly analysis
+  max_tokens: 2048
+  temperature: 0.3                 # Low temp for consistent signals
+  timeout_seconds: 30
+
+# ---- CLAUDE INTEGRATION MODES ----
+integration_modes:
+  # Mode 1: Signal Generation
+  # Claude analyzes market data and generates buy/sell signals
+  signal_generation:
+    enabled: false                 # Enable when API key is set
+    frequency: "daily"             # daily, on_signal, or continuous
+    tickers: "all"                 # all, or list of specific tickers
+    include_technical_data: true
+    include_news_sentiment: true   # Requires web search capability
+    include_sector_analysis: true
+
+  # Mode 2: Strategy Optimization
+  # Claude reviews backtest results and suggests parameter changes
+  strategy_optimization:
+    enabled: false
+    frequency: "weekly"
+    review_metrics:
+      - "sharpe_ratio"
+      - "win_rate"
+      - "max_drawdown"
+      - "profit_factor"
+    can_modify_params: true        # Allow Claude to change strategy params
+    can_add_rules: true            # Allow Claude to add custom rules
+    can_adjust_weights: true       # Allow Claude to rebalance strategy weights
+    require_backtest: true         # New params must pass backtest before going live
+
+  # Mode 3: Risk Monitor
+  # Claude monitors portfolio and alerts on risk events
+  risk_monitor:
+    enabled: false
+    check_frequency: "hourly"
+    alert_on:
+      - "max_drawdown_breach"
+      - "concentration_risk"
+      - "correlation_spike"
+      - "unusual_volume"
+      - "earnings_approaching"
+    can_force_sell: false           # Safety: Claude cannot force sell positions
+    alert_method: "log"            # log, email, or webhook
+
+  # Mode 4: Market Analysis
+  # Claude provides natural-language market commentary
+  market_analysis:
+    enabled: false
+    frequency: "daily"
+    output_format: "markdown"
+    include_charts: true
+    sections:
+      - "market_overview"
+      - "sector_rotation"
+      - "watchlist_movers"
+      - "trade_opportunities"
+      - "risk_assessment"
+
+# ---- PROMPT TEMPLATES ----
+prompts:
+  signal_generation: |
+    You are a quantitative trading analyst managing a pullback-focused portfolio.
+
+    PORTFOLIO CONTEXT:
+    {portfolio_summary}
+
+    WATCHLIST ANALYSIS:
+    {watchlist_data}
+
+    TECHNICAL DATA:
+    {technical_indicators}
+
+    TASK: Analyze each stock and generate trading signals.
+    For each stock, provide:
+    {{
+      "ticker": "SYMBOL",
+      "signal": "BUY|SELL|HOLD|STRONG_BUY|STRONG_SELL",
+      "confidence": 0.0-1.0,
+      "target_price": number,
+      "stop_loss": number,
+      "position_size_pct": 0.01-0.10,
+      "reasoning": "brief explanation"
+    }}
+
+    RULES:
+    - Maximum 10% in any single position
+    - Keep 5% cash reserve
+    - Favor asymmetric risk/reward (>3:1)
+    - Consider sector diversification
+    - Higher confidence for deeper pullbacks with technical confirmation
+
+  strategy_optimization: |
+    Review the following backtest results and current strategy parameters.
+    Suggest specific parameter changes to improve risk-adjusted returns.
+
+    CURRENT PERFORMANCE:
+    {backtest_metrics}
+
+    CURRENT PARAMETERS:
+    {strategy_params}
+
+    TRADE HISTORY (last 30 trades):
+    {recent_trades}
+
+    Provide recommendations as:
+    {{
+      "parameter_changes": [
+        {{"strategy": "name", "param": "key", "old_value": x, "new_value": y, "reasoning": "why"}}
+      ],
+      "new_rules": [...],
+      "weight_adjustments": {{"strategy_name": new_weight}},
+      "overall_assessment": "paragraph summary"
+    }}
+
+  risk_alert: |
+    ALERT: Potential risk event detected.
+
+    EVENT: {event_type}
+    DETAILS: {event_details}
+    PORTFOLIO: {portfolio_state}
+
+    Assess the severity (1-10) and recommend action:
+    {{
+      "severity": 1-10,
+      "recommendation": "hold|reduce|exit|hedge",
+      "specific_actions": ["action1", "action2"],
+      "reasoning": "explanation"
+    }}
+
+# ---- WEBHOOK / AUTOMATION ----
+webhook:
+  enabled: false
+  endpoint: "http://localhost:8080/ai/signals"
+  auth_token: null                 # Bearer token for webhook
+  retry_count: 3
+  retry_delay_seconds: 5
+
+# ---- DATA PIPELINE FOR CLAUDE ----
+data_pipeline:
+  # What data to include when querying Claude
+  include:
+    price_history_days: 30         # Last 30 days of OHLCV
+    technical_indicators: true
+    fundamental_data: false        # Enable when data source available
+    news_headlines: false          # Enable with news API
+    earnings_calendar: false
+    sector_performance: true
+    correlation_matrix: true
+
+  # Data formatting
+  format: "json"                   # json or markdown_table
+  precision: 2                     # Decimal places for numbers
+  include_charts: false            # Base64 encoded charts (large tokens)
+
+# ---- SAFETY RAILS ----
+safety:
+  max_ai_trades_per_day: 5        # Maximum trades AI can suggest per day
+  require_human_approval: true    # Human must approve AI-suggested trades
+  blackout_on_earnings: true      # No AI trading 2 days before/after earnings
+  min_confidence_to_act: 0.65    # Minimum AI confidence to generate signal
+  paper_trade_first_days: 30     # Test in paper mode for 30 days before live
+  max_portfolio_pct_ai: 0.50     # AI can only control 50% of portfolio
+  log_all_decisions: true         # Full audit trail
