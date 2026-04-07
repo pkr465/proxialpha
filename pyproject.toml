@@ -1,0 +1,34 @@
+[project]
+name = "proxialpha"
+version = "0.1.0"
+description = "AI-powered multi-strategy trading platform"
+requires-python = ">=3.10"
+dependencies = [
+    "yfinance>=0.2.36",
+    "pandas>=2.1.0",
+    "numpy>=1.26.0",
+    "pyyaml>=6.0",
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "httpx>=0.27.0",
+    "websockets>=12.0",
+    "pydantic>=2.5.0",
+    "openpyxl>=3.1.0",
+    "plotly>=5.18.0",
+]
+
+[project.optional-dependencies]
+claude = ["anthropic>=0.40.0"]
+openai = ["openai>=1.12.0"]
+gemini = ["google-generativeai>=0.4.0"]
+alpaca = ["alpaca-trade-api>=3.0.0"]
+all-llm = ["anthropic>=0.40.0", "openai>=1.12.0", "google-generativeai>=0.4.0"]
+all = [
+    "anthropic>=0.40.0",
+    "openai>=1.12.0",
+    "google-generativeai>=0.4.0",
+    "alpaca-trade-api>=3.0.0",
+]
+
+[project.scripts]
+proxialpha = "main:main"

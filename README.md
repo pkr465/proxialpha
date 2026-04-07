@@ -31,15 +31,34 @@ The installer will:
 - Optionally install Ollama with GPU-aware model recommendations
 - Verify everything works
 
+### Install Options
+
+```bash
+./install.sh                    # Auto-detect uv or pip, core deps only
+./install.sh --with-claude      # + Anthropic Claude SDK
+./install.sh --with-openai      # + OpenAI SDK
+./install.sh --with-all-llm     # + All LLM provider SDKs
+./install.sh --with-all         # + All optional deps (LLMs + Alpaca)
+./install.sh --pip              # Force pip (skip uv even if available)
+```
+
+The installer will prompt to install [uv](https://docs.astral.sh/uv/) (10-100x faster than pip). Say yes for faster installs, or use `--pip` to stick with pip.
+
 ### Option B: Manual
 
 ```bash
 git clone <your-repo-url> ~/proxialpha
 cd ~/proxialpha
 
+# With uv (fast)
+uv venv venv
+source venv/bin/activate
+uv pip install -r requirements.txt
+
+# Or with pip
 python3 -m venv venv
 source venv/bin/activate
-pip install yfinance pandas numpy openpyxl plotly pyyaml fastapi uvicorn[standard] httpx websockets
+pip install -r requirements.txt
 ```
 
 ## Start
@@ -229,7 +248,9 @@ proxialpha/
 ├── config_trading.yaml         # Execution + risk rules
 ├── config_ai_integration.yaml  # LLM provider settings
 ├── config_dashboard.yaml       # Dashboard layout config
-├── install.sh                  # Automated installer
+├── requirements.txt            # Pinned Python dependencies
+├── pyproject.toml              # Project metadata + optional extras
+├── install.sh                  # Automated installer (uv/pip + Ollama)
 ├── start.sh                    # Start script (server + CLI modes)
 └── main.py                     # CLI entry point
 ```
