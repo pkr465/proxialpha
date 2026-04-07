@@ -105,7 +105,7 @@ start_ollama() {
     # Check if already running
     if curl -s http://localhost:11434/api/tags &>/dev/null; then
         local models
-        models=$(curl -s http://localhost:11434/api/tags | python3 -c "import sys,json; d=json.load(sys.stdin); print(', '.join(m['name'] for m in d.get('models',[])) or 'none')" 2>/dev/null || echo "unknown")
+        models=$(curl -s --max-time 3 http://localhost:11434/api/tags 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(', '.join(m['name'] for m in d.get('models',[])) or 'none')" 2>/dev/null || echo "unknown")
         ok "Ollama already running — models: $models"
         return
     fi

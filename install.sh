@@ -119,7 +119,7 @@ install_ollama() {
     if command -v nvidia-smi &>/dev/null; then
         echo ""
         local vram
-        vram=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | xargs)
+        vram=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d '[:space:]')
         ok "NVIDIA GPU detected (${vram} MB VRAM)"
 
         echo ""
@@ -180,7 +180,7 @@ print('Python packages: OK')
     if command -v ollama &>/dev/null; then
         if curl -s http://localhost:11434/api/tags &>/dev/null; then
             local models
-            models=$(curl -s http://localhost:11434/api/tags | python3 -c "import sys,json; d=json.load(sys.stdin); print(', '.join(m['name'] for m in d.get('models',[])) or 'none')" 2>/dev/null || echo "unknown")
+            models=$(curl -s --max-time 3 http://localhost:11434/api/tags 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(', '.join(m['name'] for m in d.get('models',[])) or 'none')" 2>/dev/null || echo "unknown")
             ok "Ollama running — models: $models"
         else
             warn "Ollama installed but not running. Start with: ollama serve"
