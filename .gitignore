@@ -14,7 +14,7 @@ build/
 *.whl
 
 # Virtual environments
-venv/
+venv/*
 .venv/
 env/
 
@@ -71,3 +71,4 @@ yarn-error.log*
 *.apk
 *.ipa
 *.aab
+
