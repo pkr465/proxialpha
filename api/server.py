@@ -20,6 +20,9 @@ Endpoints:
   GET  /api/llm/providers          List available LLM providers
   POST /api/llm/analyze            Send analysis request to LLM
   POST /api/llm/configure          Configure LLM provider
+  GET  /api/diary                  Read trading diary (JSONL)
+  GET  /api/llm-logs                Tail raw LLM request/response log
+  GET  /api/risk/summary           Current RiskManager configuration
   WS   /ws/signals                 Real-time signal stream
   WS   /ws/prices                  Real-time price updates
 """
@@ -34,6 +37,8 @@ from contextlib import asynccontextmanager
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
+from fastapi import Request as _Request
+from fastapi import Response as _Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -120,13 +125,267 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# ---- OBSERVABILITY (P2-4: JSON logs, /metrics, request middleware) ----
+# Installed FIRST so the structured log formatter is in place before any
+# other module emits its first log line, and the request middleware sees
+# every downstream middleware's outcome (auth, CORS, rate limit). The
+# install function is idempotent and falls open if optional deps are
+# missing — see api/observability.py for the rationale on not making
+# structlog/opentelemetry/prometheus_client hard dependencies.
+try:
+    from api.observability import install_observability
+    install_observability(app)
+except Exception as _obs_exc:  # pragma: no cover - optional dep fallback
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "observability layer not installed: %s", _obs_exc
+    )
+
+# ---- CORS (P1-1: locked to allow-list) ----
+# We deliberately do NOT use ``["*"]`` here. The dashboard sends
+# credentialed requests (Clerk session cookies + tenant headers), and
+# wildcard origins + credentials = a self-serve cross-tenant data leak.
+# The allow-list is read from ``settings.cors_allowed_origins`` (CSV),
+# which defaults to the local dev dashboard. Production env MUST set
+# ``CORS_ALLOWED_ORIGINS`` explicitly. An empty string disables CORS
+# entirely (useful for backend-only deployments).
+try:
+    from core.settings import get_settings as _get_settings_for_cors
+
+    _cors_csv = _get_settings_for_cors().cors_allowed_origins or ""
+    _cors_origins = [o.strip() for o in _cors_csv.split(",") if o.strip()]
+except Exception:  # pragma: no cover - settings unavailable in trading-only checkout
+    _cors_origins = ["http://localhost:3000"]
+
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "X-Stub-User-Email",
+            "X-Stub-Org-Id",
+            "Stripe-Signature",
+        ],
+    )
+
+# ---- AUTH (P0-2: Clerk JWT verifier with stub fallback) ----
+# :class:`ClerkAuthMiddleware` is the production auth path. It verifies
+# a ``Authorization: Bearer <jwt>`` against Clerk's JWKS, JIT-creates
+# ``users`` / ``organizations`` rows on first sight, and writes
+# ``user`` + ``org_id`` to ``request.state``. When ``CLERK_ISSUER`` is
+# unset (local dev / test) it falls back to reading the stub headers
+# the old :class:`AuthStubMiddleware` used, so the existing test suite
+# keeps working unchanged.
+#
+# Wrapped in try/except so a missing pyjwt/cryptography in a
+# trading-only dev checkout doesn't crash the server at import time.
+try:
+    from api.middleware.clerk_auth import ClerkAuthMiddleware
+    app.add_middleware(ClerkAuthMiddleware)
+except Exception as _auth_exc:  # pragma: no cover - optional dep fallback
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "clerk auth middleware not installed: %s", _auth_exc
+    )
+    # Fall back to the bare stub so endpoints that read
+    # ``request.state.user`` still find a populated value in dev.
+    try:
+        from api.middleware.auth_stub import AuthStubMiddleware
+        app.add_middleware(AuthStubMiddleware)
+    except Exception as _auth_stub_exc:  # pragma: no cover
+        _logging.getLogger(__name__).warning(
+            "auth stub middleware also not installed: %s", _auth_stub_exc
+        )
+
+# ---- BILLING (Task 02: Stripe webhook handler) ----
+# Imported here rather than at the top of the file so a missing pydantic-
+# settings / stripe / asyncpg dependency in a local trading-only checkout
+# can't take down the existing endpoints. In production all deps are
+# installed from ``requirements.txt`` and this always succeeds.
+try:
+    from api.billing import billing_router, read_router
+    app.include_router(billing_router, prefix="/api/billing", tags=["billing"])
+    # The entitlements read endpoint lives at the top-level ``/api``
+    # path per spec §7.4, not under ``/api/billing``. Mount it
+    # separately so the URL shape matches the spec exactly.
+    app.include_router(read_router, prefix="/api", tags=["billing"])
+except Exception as _billing_exc:  # pragma: no cover - optional dep fallback
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "billing router not registered: %s", _billing_exc
+    )
+
+# ---- INSTALL TOKEN ADMIN (P1-4: dashboard issuer for one-shot tokens) ----
+# Mounted under ``/api`` to match the existing dashboard URL shape
+# (the route itself is ``/orgs/{org_id}/install-tokens``, so the full
+# path becomes ``/api/orgs/{org_id}/install-tokens``). This file does
+# NOT pull in Stripe — see the install_tokens_admin module docstring
+# for the rationale on splitting it out from api.billing.endpoints.
+try:
+    from api.billing.install_tokens_admin import router as install_tokens_router
+    app.include_router(install_tokens_router, prefix="/api", tags=["admin"])
+except Exception as _install_tokens_exc:  # pragma: no cover - optional dep fallback
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "install-tokens admin router not registered: %s", _install_tokens_exc
+    )
+
+# ---- SUPPORT BUNDLE UPLOAD (P2-7: doctor bundle ingest) ----
+# Receives ``.tar.gz`` bundles produced by ``proxialpha doctor`` so
+# operators no longer have to email them. The full route is
+# ``/api/support/bundles`` and accepts BOTH Clerk-authed dashboard
+# users (e.g. an admin re-uploading a customer bundle on their
+# behalf) and unenrolled agents holding a fresh install-token. The
+# install-token path uses the read-only ``lookup_install_token``
+# variant so a doctor run does not consume the token the agent still
+# needs for its own enrollment. Wrapped in the same optional-dep
+# fallback as the other billing routers.
+try:
+    from api.billing.support_bundles import router as support_bundles_router
+    app.include_router(support_bundles_router, prefix="/api", tags=["support"])
+except Exception as _support_bundles_exc:  # pragma: no cover - optional dep fallback
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "support-bundles router not registered: %s", _support_bundles_exc
+    )
+
+# ---- /.well-known/jwks.json (P0-3: JWKS rotation) ----
+# RFC 8615 well-known endpoint that publishes the control plane's
+# public signing keys (current + previous, both with stable ``kid``
+# values) so enrolled agents can refresh their key cache mid-rotation
+# without redeploying. The route is mounted at the absolute path
+# ``/.well-known/jwks.json`` with NO prefix — RFC 8615 requires the
+# well-known segment to live at the root.
+try:
+    from api.wellknown import router as wellknown_router
+    app.include_router(wellknown_router, tags=["wellknown"])
+except Exception as _wellknown_exc:  # pragma: no cover - optional dep fallback
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "wellknown JWKS router not registered: %s", _wellknown_exc
+    )
+
+# ---- AGENT HEARTBEAT (Task 06: Phase 2 — Customer Agent) ----
+# Wrapped in the same try/except pattern as the billing router so a
+# trading-only dev checkout without PyJWT / cryptography doesn't
+# crash the server at import time. In production both deps are
+# installed from ``requirements.txt`` and this always succeeds.
+#
+# The route is mounted at ``/agent/heartbeat`` (NOT under ``/api/``)
+# per ADR-003 — agent traffic has its own URL prefix so reverse
+# proxies can route / rate-limit / auth it separately from the
+# dashboard API.
+try:
+    from api.agent import agent_router
+    app.include_router(agent_router, prefix="/agent", tags=["agent"])
+except Exception as _agent_exc:  # pragma: no cover - optional dep fallback
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "agent router not registered: %s", _agent_exc
+    )
+
+# ---- ENTITLEMENTS FEATURE FLAG (P1-2: default ON) ----
+# Wraps paid routes with the ``requires_entitlement`` decorator. The
+# default is now ON (safe-by-default) — set ``ENTITLEMENTS_ENABLED=0``
+# in local dev if you want to bypass the gate. Reading from
+# ``settings.entitlements_enabled`` keeps the env-var contract
+# (``ENTITLEMENTS_ENABLED``) for backwards compat via the pydantic
+# field's alias.
+import os as _os
+try:
+    from core.settings import get_settings as _get_settings_for_ent
+
+    ENTITLEMENTS_ENABLED = _get_settings_for_ent().entitlements_enabled
+except Exception:  # pragma: no cover - settings unavailable
+    # Fall back to the old env-var behaviour but with the new safe
+    # default (ON) so a missing pydantic-settings install can't
+    # accidentally turn the gate off in production.
+    ENTITLEMENTS_ENABLED = _os.environ.get("ENTITLEMENTS_ENABLED", "1") == "1"
+
+
+# ---- ROUTE-LEVEL GATING HELPERS (P1-3: legacy trading audit) ----
+#
+# The gap analysis (docs/specs/phase2-go-live-gap-analysis.md §P1-3)
+# called out that ``/api/llm/analyze`` was the ONLY route wrapped by
+# the entitlements decorator. Every other route in this file has been
+# audited; the audit table at the bottom of this section records the
+# disposition of each one.
+#
+# The decorator is wrapped in a small ``_gated`` factory so we don't
+# repeat the "if ENTITLEMENTS_ENABLED + try/except optional dep"
+# dance at every call site. ``_gated`` is a no-op when the gate is
+# off OR when ``core.entitlements`` is missing (e.g. trading-only
+# dev checkout) — in both cases the decorator returns the function
+# unchanged so the route still works for tests.
+def _gated(feature: str, consume: int = 1):
+    if not ENTITLEMENTS_ENABLED:
+        return lambda f: f
+    try:
+        from core.entitlements import requires_entitlement
+    except Exception as _gate_exc:  # pragma: no cover - optional dep fallback
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "_gated(%s): entitlements decorator not installed: %s",
+            feature,
+            _gate_exc,
+        )
+        return lambda f: f
+    return requires_entitlement(feature, consume=consume)
+
+
+# Helper to open a short-lived AsyncSession for in-route flag/cap
+# checks (the boolean and cap gates do not need the consume path's
+# atomic UPDATE — see api/billing/feature_gates.py for the rationale).
+# Returns ``None`` if asyncpg / pydantic-settings are not installed in
+# the current checkout, in which case the calling route should treat
+# the check as "skipped" and continue.
+def _open_billing_session():  # -> AsyncContextManager[AsyncSession] | None
+    if not ENTITLEMENTS_ENABLED:
+        return None
+    try:
+        from core.entitlements import _session_factory  # uses test-overridable factory
+    except Exception:  # pragma: no cover - optional dep fallback
+        return None
+    return _session_factory()
+
+
+# AUDIT TABLE — disposition of every route in this file as of P1-3.
+# Updates here are LOAD-BEARING: when a new route is added, this
+# block must be updated in the same PR or the gap re-opens.
+#
+#   Route                          Method  Disposition         Gate
+#   /api/health                    GET     unauthenticated     none
+#   /api/strategies                GET     read-only           none
+#   /api/strategies/activate       POST    boolean (custom)    custom_strategies
+#   /api/strategies/weights        POST    in-process tweak    none (covered by tier on /activate)
+#   /api/watchlist                 GET     read-only           none
+#   /api/watchlist/add             POST    cap (tickers)       inline assert_within_cap
+#   /api/scan                      GET     in-process pandas   none (no LLM, no DB)
+#   /api/portfolio                 GET     read-only           none
+#   /api/trade                     POST    boolean (live)      conditional assert_feature_flag
+#   /api/backtest                  GET     consumable          @_gated("backtests", 1)
+#   /api/performance               GET     read-only           none
+#   /api/llm/providers             GET     read-only           none
+#   /api/llm/configure             POST    config write        none (provider/key in body)
+#   /api/llm/analyze               POST    consumable          @_gated("signals", 1)
+#   /api/diary                     GET     read-only           none
+#   /api/llm-logs                  GET     read-only           none
+#   /api/risk/summary              GET     read-only           none
+#   /ws/signals, /ws/prices        WS      read-only           none
+#
+# Routes flagged "in-process pandas" (e.g. /api/scan) deliberately
+# stay un-gated: they don't talk to a paid provider and they don't
+# decrement a quota. If we later push them onto a metered backend
+# they'll move to a consumable feature.
+#
+# Routes mounted by other routers (api.billing, api.agent,
+# api.wellknown, api.billing.install_tokens_admin) carry their own
+# auth/entitlement decisions inside those modules and are out of
+# scope for this audit.
 
 
 # ---- MODELS ----
@@ -186,9 +445,34 @@ async def list_strategies():
 
 
 @app.post("/api/strategies/activate")
-async def toggle_strategy(req: StrategyToggle):
+async def toggle_strategy(req: StrategyToggle, request: _Request):
     if req.name not in STRATEGY_REGISTRY:
         raise HTTPException(404, f"Strategy '{req.name}' not found")
+
+    # P1-3: registering a NEW strategy (one not already in the
+    # manager's roster) counts as enabling a custom strategy slot.
+    # Re-toggling an already-registered strategy is free for any tier
+    # — the work-of-art is the registration itself, not the on/off bit.
+    # Free-tier orgs that haven't paid for ``custom_strategies`` get
+    # blocked at registration time.
+    if req.name not in state.manager.strategies and req.active:
+        org_id = getattr(request.state, "org_id", None)
+        if ENTITLEMENTS_ENABLED and org_id is not None:
+            try:
+                from api.billing.feature_gates import assert_feature_flag
+            except Exception as _gate_exc:  # pragma: no cover - optional dep fallback
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "strategies/activate: custom_strategies gate skipped: %s",
+                    _gate_exc,
+                )
+            else:
+                session_cm = _open_billing_session()
+                if session_cm is not None:
+                    async with session_cm as _session:
+                        await assert_feature_flag(
+                            _session, org_id, "custom_strategies"
+                        )
 
     if req.name not in state.manager.strategies:
         cls = STRATEGY_REGISTRY[req.name]
@@ -224,7 +508,31 @@ async def get_watchlist():
 
 
 @app.post("/api/watchlist/add")
-async def add_to_watchlist(req: WatchlistAdd):
+async def add_to_watchlist(req: WatchlistAdd, request: _Request):
+    # P1-3: enforce the per-tier ``tickers`` cap before mutating
+    # WATCHLIST. Adding ticker T raises the proposed total to
+    # ``len(current_watchlist) + 1`` (or stays put if T is already
+    # present, in which case the cap is trivially satisfied).
+    org_id = getattr(request.state, "org_id", None)
+    if ENTITLEMENTS_ENABLED and org_id is not None and req.ticker not in WATCHLIST:
+        try:
+            from api.billing.feature_gates import assert_within_cap
+        except Exception as _gate_exc:  # pragma: no cover - optional dep fallback
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "watchlist/add: tickers gate skipped: %s", _gate_exc
+            )
+        else:
+            session_cm = _open_billing_session()
+            if session_cm is not None:
+                async with session_cm as _session:
+                    await assert_within_cap(
+                        _session,
+                        org_id,
+                        "tickers",
+                        proposed_count=len(WATCHLIST) + 1,
+                    )
+
     WATCHLIST[req.ticker] = {"high": req.high, "low": req.low, "sector": req.sector}
     # Fetch data for new ticker
     df = fetch_stock_data(req.ticker, period="6mo")
@@ -258,12 +566,38 @@ async def get_portfolio():
 
 
 @app.post("/api/trade")
-async def execute_trade(req: TradeRequest):
+async def execute_trade(req: TradeRequest, request: _Request):
     if not state.trader:
         raise HTTPException(500, "Paper trading not initialized")
 
     if req.ticker not in state.data:
         raise HTTPException(404, f"Ticker {req.ticker} not in watchlist")
+
+    # P1-3: gate live trading behind the per-tier ``live_trading`` flag.
+    # The current build wires ``state.trader`` to PaperTrader, so this
+    # check is a defence-in-depth no-op today. The moment a real broker
+    # adapter (live_trading/alpaca_bot.py, hyperliquid_bot.py) is
+    # plumbed into ``state.trader`` and exposes ``is_live = True``, the
+    # gate kicks in WITHOUT another audit pass. We deliberately make
+    # the predicate "is this trader live?" rather than relying on a
+    # separate route, because the gap analysis specifically called out
+    # that a paper-only customer must not be able to drive a live
+    # broker via this same endpoint.
+    is_live = bool(getattr(state.trader, "is_live", False))
+    org_id = getattr(request.state, "org_id", None)
+    if is_live and ENTITLEMENTS_ENABLED and org_id is not None:
+        try:
+            from api.billing.feature_gates import assert_feature_flag
+        except Exception as _gate_exc:  # pragma: no cover - optional dep fallback
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "trade: live_trading gate skipped: %s", _gate_exc
+            )
+        else:
+            session_cm = _open_billing_session()
+            if session_cm is not None:
+                async with session_cm as _session:
+                    await assert_feature_flag(_session, org_id, "live_trading")
 
     price = float(state.data[req.ticker]['Close'].iloc[-1])
 
@@ -278,13 +612,31 @@ async def execute_trade(req: TradeRequest):
     return {"trade": result}
 
 
-@app.get("/api/backtest")
-async def run_backtest(capital: float = Query(DEFAULT_CAPITAL), days: int = Query(504)):
+# P1-3: backtests are a metered consumable. The route always declares
+# ``request`` and ``response`` so flipping ENTITLEMENTS_ENABLED on/off
+# does not change the signature — FastAPI injects them either way.
+async def _run_backtest_impl(
+    capital: float,
+    days: int,
+    request: _Request,
+    response: _Response,
+):
     engine = BacktestEngine(state.manager, capital)
     results = engine.run(state.data)
     summary = engine.get_summary()
     curve = results['equity_curve'].to_dict('records') if not results['equity_curve'].empty else []
     return {"summary": summary, "equity_curve": curve[-100:]}  # Last 100 points
+
+
+@app.get("/api/backtest")
+@_gated("backtests", consume=1)
+async def run_backtest(
+    request: _Request,
+    response: _Response,
+    capital: float = Query(DEFAULT_CAPITAL),
+    days: int = Query(504),
+):
+    return await _run_backtest_impl(capital, days, request, response)
 
 
 @app.get("/api/performance")
@@ -309,8 +661,72 @@ async def configure_llm(req: LLMConfigRequest):
     return {"configured": req.provider, "model": req.model}
 
 
-@app.post("/api/llm/analyze")
-async def llm_analyze(req: LLMAnalyzeRequest):
+# ---- DIARY / LLM LOG ROUTES ----
+@app.get("/api/diary")
+async def get_diary_entries(
+    limit: int = Query(200, ge=1, le=2000),
+    event: Optional[str] = Query(None),
+    source: str = Query("paper", pattern="^(paper|live|backtest|ai)$"),
+):
+    """Return recent diary entries, newest first.
+
+    Args:
+        limit: number of entries to return
+        event: optional event_type filter (trade_executed, trade_rejected, decision, ...)
+        source: which diary file to read (paper/live/backtest/ai)
+    """
+    try:
+        from core.diary import get_diary
+    except ImportError:
+        return {"entries": [], "error": "diary module unavailable"}
+    path_map = {
+        "paper": "data/paper_diary.jsonl",
+        "live": "data/live_diary.jsonl",
+        "backtest": "data/backtest_diary.jsonl",
+        "ai": "data/diary.jsonl",
+    }
+    diary = get_diary(path_map[source])
+    return {"entries": diary.read(limit=limit, event_filter=event), "source": source}
+
+
+@app.get("/api/llm-logs")
+async def get_llm_logs(n_bytes: int = Query(20000, ge=1000, le=500000)):
+    """Return the last ``n_bytes`` of the raw LLM request/response log."""
+    try:
+        from core.diary import get_llm_log
+    except ImportError:
+        return {"log": "", "error": "diary module unavailable"}
+    llm_log = get_llm_log()
+    return {"log": llm_log.tail(n_bytes=n_bytes), "path": str(llm_log.path)}
+
+
+@app.get("/api/risk/summary")
+async def get_risk_summary():
+    """Return the active RiskManager configuration."""
+    try:
+        from core.risk_manager import RiskManager
+    except ImportError:
+        return {"error": "risk_manager unavailable"}
+    rm = getattr(state.trader, "risk_manager", None) or RiskManager()
+    return {"risk": rm.get_risk_summary()}
+
+
+# Sentinel application of the entitlement decorator. Task 04 gates the
+# LLM-backed "signal" generation route behind the ``signals`` feature
+# quota. The decorator is applied conditionally so the existing
+# integration tests (which have no billing DB) keep working: when
+# ``ENTITLEMENTS_ENABLED`` is off the route runs unchanged; when on, the
+# decorator reads ``request.state.org_id`` (set by AuthStubMiddleware)
+# and either consumes 1 quota unit or returns 402.
+#
+# The route declares ``request`` and ``response`` regardless of the flag
+# so enabling ``ENTITLEMENTS_ENABLED`` later does not require a signature
+# change — FastAPI injects both either way.
+async def _llm_analyze_impl(
+    req: LLMAnalyzeRequest,
+    request: _Request,
+    response: _Response,
+):
     if not state.llm:
         raise HTTPException(400, "LLM not configured. Call POST /api/llm/configure first.")
 
@@ -328,8 +744,22 @@ async def llm_analyze(req: LLMAnalyzeRequest):
     if req.include_portfolio and state.trader:
         context['portfolio'] = state.trader.get_performance()
 
-    response = state.llm.analyze(json.dumps(context, default=str), req.prompt)
-    return {"response": response.text, "model": response.model, "provider": response.provider}
+    llm_response = state.llm.analyze(json.dumps(context, default=str), req.prompt)
+    return {"response": llm_response.text, "model": llm_response.model, "provider": llm_response.provider}
+
+
+# P1-3: simplified to use the shared ``_gated`` factory. The factory
+# already handles ``ENTITLEMENTS_ENABLED`` off + missing optional dep,
+# so the three branches we used to maintain (gated / fallback / no-op)
+# collapse to one.
+@app.post("/api/llm/analyze")
+@_gated("signals", consume=1)
+async def llm_analyze(
+    req: LLMAnalyzeRequest,
+    request: _Request,
+    response: _Response,
+):
+    return await _llm_analyze_impl(req, request, response)
 
 
 # ---- WEBSOCKET ----

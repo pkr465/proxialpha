@@ -7,18 +7,29 @@ from datetime import datetime
 from strategies.base import BaseStrategy, StrategySignal, SignalType
 from strategies.strategy_manager import StrategyManager
 from core.config import DEFAULT_CAPITAL, MAX_POSITION_SIZE, COMMISSION_PER_TRADE
+from core.risk_manager import RiskManager
+from core.diary import get_diary
 
 
 class BacktestEngine:
     """
     Event-driven backtesting engine.
     Walks through historical data day-by-day, generates signals, simulates execution.
+
+    As of the Hyperliquid integration, every proposed fill passes through the
+    centralized ``RiskManager`` so backtest behavior matches live trading.
     """
 
-    def __init__(self, strategy_manager: StrategyManager, initial_capital: float = DEFAULT_CAPITAL):
+    def __init__(self, strategy_manager: StrategyManager,
+                 initial_capital: float = DEFAULT_CAPITAL,
+                 risk_manager: RiskManager | None = None,
+                 enable_diary: bool = False):
         self.manager = strategy_manager
         self.initial_capital = initial_capital
         self.results = None
+        self.risk_manager = risk_manager or RiskManager()
+        self.enable_diary = enable_diary
+        self._diary = get_diary("data/backtest_diary.jsonl") if enable_diary else None
 
     def run(self, data: dict[str, pd.DataFrame], start_date: str = None, end_date: str = None) -> dict:
         """
@@ -112,22 +123,56 @@ class BacktestEngine:
                     allocation = day_value * size_pct
                     allocation = min(allocation, cash * 0.95)  # Keep 5% cash buffer
 
+                    # Centralized risk gate -------------------------------------------------
+                    proposed = {
+                        'ticker': ticker,
+                        'action': 'buy',
+                        'allocation_usd': allocation,
+                        'current_price': price,
+                        'sl_price': consensus.get('stop_loss'),
+                        'tp_price': consensus.get('target_price'),
+                    }
+                    account_state = {
+                        'balance': cash,
+                        'cash': cash,
+                        'total_value': day_value,
+                        'equity': day_value,
+                        'positions': positions,
+                    }
+                    allowed, reason, adjusted = self.risk_manager.validate_trade(
+                        proposed, account_state, self.initial_capital
+                    )
+                    if not allowed:
+                        if self._diary:
+                            self._diary.log_trade_rejected(proposed, reason)
+                        continue
+
+                    allocation = float(adjusted.get('allocation_usd', allocation))
+                    sl_price = adjusted.get('sl_price') or consensus.get('stop_loss')
+
                     if allocation > 100:  # Minimum $100 position
                         shares = int(allocation / price)
                         if shares > 0:
                             cost = shares * price + COMMISSION_PER_TRADE
+                            if cost > cash:
+                                continue
                             cash -= cost
                             positions[ticker] = {
                                 'shares': shares,
                                 'avg_cost': price,
                                 'entry_date': date_str,
-                                'stop_loss': consensus.get('stop_loss'),
+                                'stop_loss': sl_price,
                                 'target': consensus.get('target_price'),
                             }
                             trade_log.append({
                                 'date': date_str, 'ticker': ticker, 'action': 'BUY',
                                 'shares': shares, 'price': price, 'cost': round(cost, 2),
                             })
+                            if self._diary:
+                                self._diary.log_trade_executed(
+                                    'backtest', proposed,
+                                    {'shares': shares, 'cost': cost, 'sl': sl_price},
+                                )
 
                 # Execute SELL
                 elif signal in ('SELL', 'STRONG_SELL') and ticker in positions:

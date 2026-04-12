@@ -3,32 +3,106 @@ name = "proxialpha"
 version = "0.1.0"
 description = "AI-powered multi-strategy trading platform"
 requires-python = ">=3.10"
+# NOTE: Phase 1 + Phase 2 declare BOTH the agent's runtime deps and the
+# control plane's. We list every package the control plane actually
+# imports (alembic, sqlalchemy, asyncpg, psycopg, stripe) so that
+# ``pip install .`` on a fresh machine produces a runnable server. The
+# legacy trading-engine deps (yfinance, pandas, numpy, plotly, openpyxl)
+# stay in this list because the legacy routers in api.server still
+# import them; once those are split out into a separate package they
+# will move into an optional ``trading`` extra.
 dependencies = [
-    "yfinance>=0.2.36",
-    "pandas>=2.1.0",
-    "numpy>=1.26.0",
-    "pyyaml>=6.0",
+    # ----- agent runtime + control plane HTTP layer -----
     "fastapi>=0.109.0",
     "uvicorn[standard]>=0.27.0",
     "httpx>=0.27.0",
     "websockets>=12.0",
     "pydantic>=2.5.0",
+    "pydantic-settings>=2.0.0",
+    "pyjwt[crypto]>=2.8.0",
+    "cryptography>=42.0",
+    # ----- control plane database + migrations -----
+    "sqlalchemy[asyncio]>=2.0",
+    "alembic>=1.13",
+    "asyncpg>=0.29",
+    "psycopg[binary]>=3.1",
+    "aiosqlite>=0.19",
+    # ----- control plane billing + auth -----
+    "stripe>=8.0",
+    # ----- legacy trading engines (do not remove without splitting api/server.py) -----
+    "yfinance>=0.2.36",
+    "pandas>=2.1.0",
+    "numpy>=1.26.0",
+    "pyyaml>=6.0",
     "openpyxl>=3.1.0",
     "plotly>=5.18.0",
 ]
 
 [project.optional-dependencies]
+# Test deps. As of P2-3 the test_schema.py fixtures are explicitly
+# decorated with ``@pytest_asyncio.fixture(loop_scope="module")`` so
+# we no longer need the < 0.24 cap. The lower bound stays at 0.23
+# because that's the first release where loop_scope is honoured.
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.27.0",
+    "aiosqlite>=0.19",
+]
 claude = ["anthropic>=0.40.0"]
 openai = ["openai>=1.12.0"]
 gemini = ["google-generativeai>=0.4.0"]
 alpaca = ["alpaca-trade-api>=3.0.0"]
+hyperliquid = [
+    "hyperliquid-python-sdk>=0.9.0",
+    "eth-account>=0.11.0",
+    "aiohttp>=3.9.0",
+    "websocket-client>=1.7.0",
+]
 all-llm = ["anthropic>=0.40.0", "openai>=1.12.0", "google-generativeai>=0.4.0"]
 all = [
     "anthropic>=0.40.0",
     "openai>=1.12.0",
     "google-generativeai>=0.4.0",
     "alpaca-trade-api>=3.0.0",
+    "hyperliquid-python-sdk>=0.9.0",
+    "eth-account>=0.11.0",
 ]
 
 [project.scripts]
-proxialpha = "main:main"
+proxialpha = "proxialpha_agent.cli:main"
+
+[tool.setuptools]
+# The repo is a mixed layout: the legacy ``main.py``/``core/``/``api/``
+# tree coexists with the Phase 2 ``proxialpha_agent/`` package. List the
+# packages explicitly so setuptools doesn't try to auto-discover the
+# whole tree and pull in scratch dirs.
+#
+# IMPORTANT: api.billing, api.middleware, and jobs are LOAD-BEARING for
+# the control plane — they were previously omitted, which silently
+# stripped the entitlements router, the auth middleware, and the
+# metering cron from any wheel built from this repo. Do not remove.
+packages = [
+    "proxialpha_agent",
+    "proxialpha_agent.keys",
+    "core",
+    "api",
+    "api.agent",
+    "api.billing",
+    "api.middleware",
+    "jobs",
+]
+
+[tool.setuptools.package-data]
+"proxialpha_agent.keys" = ["*.pem"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+# P2-3: pin the default loop scope so pytest-asyncio 1.x stops emitting
+# the "unset asyncio_default_fixture_loop_scope" deprecation warning at
+# every collection. Module scope matches the schema-test fixtures
+# (engine + session are module-scoped) so the same loop is reused
+# across the parametrised cases without thrashing connection pools.
+asyncio_default_fixture_loop_scope = "module"
+asyncio_default_test_loop_scope = "module"
+testpaths = ["tests"]

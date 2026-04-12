@@ -84,6 +84,36 @@ paper_trading:
   simulated_slippage_pct: 0.001  # 0.1% simulated slippage
   simulated_fill_delay_sec: 1    # 1 second fill delay
 
+# ---- BROKERS ----
+# Multi-broker routing. StrategyManager routes orders by asset class.
+# Equities -> Alpaca, perps/HIP-3 tradfi -> Hyperliquid.
+brokers:
+  alpaca:
+    enabled: true
+    asset_classes: ["equity"]
+    # Keys come from env: ALPACA_API_KEY / ALPACA_SECRET_KEY / ALPACA_BASE_URL
+
+  hyperliquid:
+    enabled: false                   # Off by default; requires hyperliquid-python-sdk
+    asset_classes: ["perp", "hip3"]
+    network: "mainnet"               # mainnet or testnet
+    # Secrets come from env: HL_AGENT_KEY (signer) and HL_VAULT (custody wallet)
+    # base_url: https://api.hyperliquid.xyz   # optional override
+
+# ---- RISK MANAGER (centralized) ----
+# Read by core/risk_manager.py. These override the baked-in DEFAULTS
+# and are the authoritative values used by backtest / paper / live.
+risk_manager:
+  max_position_pct: 10.0                 # single position <= 10% of account
+  max_loss_per_position_pct: 20.0        # force-close at 20% position-level loss
+  max_leverage: 1.0                      # 1x for equities (bump for perps)
+  max_total_exposure_pct: 80.0           # sum of notionals cap
+  daily_loss_circuit_breaker_pct: 15.0   # halt trading on 15% daily drawdown
+  mandatory_sl_pct: 8.0                  # auto-set SL at 8% if missing
+  max_concurrent_positions: 10
+  min_balance_reserve_pct: 10.0
+  min_order_usd: 100.0                   # Alpaca minimum; drop to 10 for HL
+
 # ---- BACKTESTING ----
 backtesting:
   lookback_years: 3               # How many years of history to test

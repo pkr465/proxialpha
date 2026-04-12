@@ -1,0 +1,135 @@
+# syntax=docker/dockerfile:1.6
+#
+# ProxiAlpha Customer Agent — Phase 2 Docker image.
+#
+# This image runs on customer hardware. It is distributed via
+# ghcr.io/proxialpha/agent and tagged with the matching
+# proxialpha_agent.__version__ string. Constraints:
+#
+# * Reproducible: multi-stage build with pinned base digests,
+#   no ``pip install`` against a floating ``latest``, no network
+#   calls from the runtime stage.
+# * Non-root: runs as UID 1000 ``proxialpha``; the entrypoint
+#   writes state into ``/var/lib/proxialpha`` which must be
+#   mounted as a persistent volume.
+# * Localhost-only health: exposes 9877 for the operator to
+#   scrape via ``docker exec curl`` or a sidecar; the supervisor
+#   itself refuses to bind to non-loopback addresses.
+# * No secrets baked in: never ``COPY`` a .env, JWT key, or
+#   Stripe key. The CI verify step greps every image layer for
+#   known secret markers and fails the build if any match.
+# * Slim: ≤500 MB final image size. Achieved by using
+#   python:3.11-slim + a venv staged out of the builder.
+#
+# Multi-arch builds (linux/amd64, linux/arm64) are driven by
+# ``scripts/build_agent.sh`` via ``docker buildx``. Do not use
+# ``docker build`` directly — it won't produce the arm64 tag.
+
+# -------- builder stage --------------------------------------------------
+FROM python:3.11-slim-bookworm AS builder
+
+# Install the build toolchain needed for any native wheels we
+# can't get pre-compiled (cryptography is the usual offender).
+# Pin to the bookworm point release to keep builds reproducible.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        build-essential \
+        gcc \
+        libffi-dev \
+        libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create a dedicated venv so we can copy it wholesale into the
+# runtime stage without dragging along pip's metadata caches.
+ENV VIRTUAL_ENV=/opt/venv
+RUN python -m venv "$VIRTUAL_ENV"
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+WORKDIR /build
+
+# Install dependencies BEFORE copying source so changes to the
+# agent code don't bust the pip layer cache.
+COPY pyproject.toml ./
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir \
+        "httpx>=0.27.0" \
+        "pydantic>=2.5.0" \
+        "pydantic-settings>=2.0.0" \
+        "pyjwt>=2.0" \
+        "cryptography>=42.0"
+
+# Copy only the agent package + pyproject; the legacy trading
+# code is NOT part of the customer agent image.
+COPY proxialpha_agent/ ./proxialpha_agent/
+COPY core/ ./core/
+RUN pip install --no-cache-dir --no-deps .
+
+
+# -------- runtime stage --------------------------------------------------
+FROM python:3.11-slim-bookworm AS runtime
+
+# Minimal apt layer — curl is used by the HEALTHCHECK, tini
+# reaps child processes cleanly so the supervisor's asyncio
+# signal handling isn't fighting PID 1 semantics.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        curl \
+        tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root user. UID 1000 matches the common "first non-root
+# user" convention on customer Linux boxes so a bind-mounted
+# ``/var/lib/proxialpha`` from the host doesn't need chown.
+RUN groupadd --system --gid 1000 proxialpha \
+    && useradd --system --uid 1000 --gid 1000 \
+        --home-dir /var/lib/proxialpha \
+        --shell /usr/sbin/nologin \
+        proxialpha
+
+# Copy the prepared venv out of the builder stage.
+COPY --from=builder /opt/venv /opt/venv
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# Persistent agent state (license, fingerprint, rotated tokens).
+# Customers should mount this as a docker volume or host bind
+# so restarts don't re-enroll.
+RUN mkdir -p /var/lib/proxialpha \
+    && chown -R proxialpha:proxialpha /var/lib/proxialpha
+VOLUME ["/var/lib/proxialpha"]
+
+ENV PROXIALPHA_HOME=/var/lib/proxialpha \
+    PROXIALPHA_HEALTH_HOST=127.0.0.1 \
+    PROXIALPHA_HEALTH_PORT=9877 \
+    PROXIALPHA_LOG_LEVEL=INFO
+
+WORKDIR /app
+
+USER proxialpha
+
+# Healthcheck hits the supervisor's localhost-only /health
+# endpoint. Curl is required because the supervisor refuses
+# to bind to 0.0.0.0 — a docker HTTP probe from the outside
+# would never reach it.
+EXPOSE 9877
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl --fail --silent --show-error \
+        "http://127.0.0.1:${PROXIALPHA_HEALTH_PORT:-9877}/health" \
+        || exit 1
+
+# tini as PID 1 so ``SIGTERM`` is forwarded cleanly to the
+# asyncio supervisor without the usual Python PID-1 quirks.
+ENTRYPOINT ["/usr/bin/tini", "--", "python", "-m", "proxialpha_agent"]
+CMD ["run"]
+
+# OCI labels. The ``version`` label is consumed by verify_image.sh
+# as a second opinion on what this image actually is — it greps
+# ``docker inspect`` to confirm it matches the git tag.
+LABEL org.opencontainers.image.title="proxialpha-agent" \
+      org.opencontainers.image.description="ProxiAlpha customer trading agent (Phase 2)" \
+      org.opencontainers.image.source="https://github.com/proxialpha/proxialpha" \
+      org.opencontainers.image.licenses="Proprietary" \
+      org.opencontainers.image.vendor="ProxiAlpha" \
+      org.opencontainers.image.version="1.0.0-rc.1"

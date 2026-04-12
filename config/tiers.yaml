@@ -1,0 +1,74 @@
+# ProxiAlpha tier definitions — source of truth for entitlements.
+#
+# Phase 1 PRD §10. This file is loaded at module import time by
+# ``api.billing.entitlement_seeder`` and referenced by the webhook handler
+# to validate price-to-tier mappings.
+#
+# The ``stripe_prices`` values are **env var names**, not literal IDs. The
+# handler resolves them via ``os.environ`` at dispatch time so a single
+# build of the control plane works across test, staging, and production
+# Stripe accounts without rebuilding the image.
+#
+# Editing rules:
+#  * Never rename an existing feature key without a migration — the
+#    ``entitlements`` table stores feature names as plain text.
+#  * Increasing an included quota is safe; decreasing one needs a
+#    migration plan (grandfathered customers keep the old number until
+#    their next renewal).
+#  * ``free`` has no stripe_prices — it's the default that orgs fall
+#    back to when subscriptions are canceled.
+tiers:
+  free:
+    signals_included: 20
+    backtests_included: 10
+    tickers_max: 5
+    strategy_slots_max: 2
+    live_trading: false
+    live_perps: false
+    custom_strategies: false
+    api_access: none
+    diary_retention_days: 7
+  trader:
+    signals_included: 500
+    backtests_included: 200
+    tickers_max: 25
+    strategy_slots_max: 5
+    live_trading: true
+    live_perps: false
+    custom_strategies: false
+    api_access: read
+    diary_retention_days: 90
+    stripe_prices:
+      monthly: STRIPE_PRICE_TRADER_MONTHLY
+      annual: STRIPE_PRICE_TRADER_ANNUAL
+    overage_price: STRIPE_PRICE_SIGNAL_OVERAGE_TRADER
+  pro:
+    signals_included: 5000
+    backtests_included: 2000
+    tickers_max: 200
+    strategy_slots_max: 20
+    live_trading: true
+    live_perps: true
+    custom_strategies: true
+    api_access: read_write
+    diary_retention_days: 365
+    stripe_prices:
+      monthly: STRIPE_PRICE_PRO_MONTHLY
+      annual: STRIPE_PRICE_PRO_ANNUAL
+    overage_price: STRIPE_PRICE_SIGNAL_OVERAGE_PRO
+  team:
+    signals_included: 25000
+    backtests_included: 100000
+    tickers_max: 10000
+    strategy_slots_max: 500
+    live_trading: true
+    live_perps: true
+    custom_strategies: true
+    api_access: full
+    diary_retention_days: 2555  # 7 years
+    seats_included: 5
+    stripe_prices:
+      monthly: STRIPE_PRICE_TEAM_MONTHLY
+      annual: STRIPE_PRICE_TEAM_ANNUAL
+    overage_price: STRIPE_PRICE_SIGNAL_OVERAGE_TEAM
+    seat_price: STRIPE_PRICE_TEAM_SEAT

@@ -1,0 +1,103 @@
+# docker-compose for local control-plane smoke testing.
+#
+# This is NOT the production deploy unit — production runs on a real
+# orchestrator (Fly.io / ECS / GKE) with managed Postgres and proper
+# secrets. This file exists so an engineer can boot the full
+# control-plane stack on their laptop with one command:
+#
+#     docker compose -f deploy/docker-compose.controlplane.yml up --build
+#
+# It brings up:
+#   * postgres   — Postgres 16 with pgcrypto preinstalled
+#   * migrate    — alembic upgrade head, runs once and exits
+#   * api        — the control plane on port 8000
+#   * meter      — the meter_usage cron job (runs hourly)
+#
+# Stripe and Clerk are NOT mocked here — set their secrets in your
+# `.env` file or via shell exports before running. The compose file
+# will inherit them via the `${VAR}` syntax.
+
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: proxialpha-cp-postgres
+    environment:
+      POSTGRES_USER: proxialpha
+      POSTGRES_PASSWORD: proxialpha
+      POSTGRES_DB: proxialpha
+    ports:
+      - "5433:5432"  # avoid colliding with a local pg on 5432
+    volumes:
+      - cp-pgdata:/var/lib/postgresql/data
+      - ./postgres-init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "proxialpha"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.controlplane
+    container_name: proxialpha-cp-migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://proxialpha:proxialpha@postgres:5432/proxialpha
+      ALEMBIC_DATABASE_URL: postgresql+psycopg2://proxialpha:proxialpha@postgres:5432/proxialpha
+      BG_WORKER_PASSWORD: ${BG_WORKER_PASSWORD:-changemechangememe}
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.controlplane
+    container_name: proxialpha-cp-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql+asyncpg://proxialpha:proxialpha@postgres:5432/proxialpha
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-sk_test_placeholder}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-whsec_test_placeholder}
+      APP_URL: ${APP_URL:-http://localhost:3000}
+      CONTROL_PLANE_PUBLIC_URL: ${CONTROL_PLANE_PUBLIC_URL:-http://localhost:8000}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000}
+      CLERK_ISSUER: ${CLERK_ISSUER:-}
+      ENTITLEMENTS_ENABLED: "1"
+      AGENT_SIGNING_KEY_PEM: ${AGENT_SIGNING_KEY_PEM:-}
+      ENV: ${ENV:-dev}
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2).status == 200 else sys.exit(1)"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+
+  meter:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.controlplane
+    container_name: proxialpha-cp-meter
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql+asyncpg://proxialpha:proxialpha@postgres:5432/proxialpha
+    # Run forever, sleep for an hour between iterations. In production
+    # this is a real cron job (k8s CronJob / ECS Scheduled Task).
+    command: ["sh", "-c", "while true; do python -m jobs.meter_usage; sleep 3600; done"]
+    restart: unless-stopped
+
+volumes:
+  cp-pgdata:

@@ -1,0 +1,93 @@
+# -----------------------------------------------------------------
+# ProxiAlpha agent Docker build context filter.
+#
+# Rule of thumb: the agent image should contain ONLY the
+# proxialpha_agent package + its runtime deps + the small slice
+# of ``core`` needed for JWT key loading. Everything else on
+# disk is scratch, IDE noise, or would leak information about
+# the host into the image. Default: exclude everything, then
+# add back the whitelist below.
+# -----------------------------------------------------------------
+
+# Version control. Never ship a .git dir inside a customer image
+# — it would expose commit history, branch names, and refs.
+.git
+.gitignore
+.gitattributes
+.github
+
+# Virtual envs / compiled Python
+venv/
+.venv/
+env/
+.env
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Editors / OS cruft
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+*.sublime-*
+Thumbs.db
+
+# Test artifacts — the runtime image never runs tests; tests
+# run in a separate CI job that has the source tree checked out
+# normally.
+tests/
+.tox/
+
+# Documentation — shipped via docs.proxialpha.io, not inside
+# the agent image.
+docs/
+*.md
+!README.md
+Architecture_Document.docx
+*.docx
+*.pdf
+
+# Legacy trading engine tree — the customer agent doesn't
+# execute trades directly yet; the live_trading/paper_trading/
+# backtesting modules are not part of the image.
+live_trading/
+paper_trading/
+backtesting/
+data/
+logs/
+results/
+
+# Build scratch
+build/
+dist/
+*.egg-info/
+node_modules/
+
+# Secrets — belt-and-suspenders. The verify step will grep
+# the built image layers for these patterns, but we should
+# never even send them to the build context in the first place.
+*.pem
+*.key
+*.p12
+*.pfx
+.env.*
+secrets/
+.secrets/
+
+# Docker itself
+Dockerfile
+Dockerfile.*
+!Dockerfile.agent
+docker-compose*.yml
+
+# Build scripts and CI config — not needed inside the image.
+scripts/
+.trivyignore

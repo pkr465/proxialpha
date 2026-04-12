@@ -1,0 +1,99 @@
+# syntax=docker/dockerfile:1.6
+#
+# Control plane container for ProxiAlpha (P1-9 in the Phase 2 go-live
+# gap analysis). This image runs the FastAPI control plane that handles
+# Stripe webhooks, agent enrollment, agent heartbeats, and the Clerk-
+# authed dashboard API. It is **separate** from `Dockerfile.agent`
+# (which builds the customer-facing trading agent).
+#
+# Build:
+#   docker build -f deploy/Dockerfile.controlplane -t proxialpha-controlplane:latest .
+#
+# Run (local smoke test):
+#   docker run --rm -p 8000:8000 \
+#     -e DATABASE_URL=postgresql+asyncpg://... \
+#     -e STRIPE_SECRET_KEY=sk_test_... \
+#     -e STRIPE_WEBHOOK_SECRET=whsec_... \
+#     -e CLERK_ISSUER=https://your-instance.clerk.accounts.dev \
+#     -e AGENT_SIGNING_KEY_PATH=/run/secrets/agent_signing_key.pem \
+#     -e CONTROL_PLANE_PUBLIC_URL=https://api.proxiant.io \
+#     -e CORS_ALLOWED_ORIGINS=https://app.proxiant.io \
+#     -e ENV=prod \
+#     -v /local/path/agent_signing_key.pem:/run/secrets/agent_signing_key.pem:ro \
+#     proxialpha-controlplane:latest
+#
+# Multi-stage build keeps the runtime image small: builder stage holds
+# the wheel cache and compilation toolchain; final stage only carries
+# the venv and the application source.
+
+# ---------- builder ----------
+FROM python:3.11-slim AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        build-essential \
+        libpq-dev \
+        ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Install into a relocatable venv so the runtime stage can copy it
+# verbatim without re-running pip.
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+COPY requirements.txt requirements.lock ./
+RUN pip install --upgrade pip wheel \
+ && pip install -r requirements.txt
+
+# ---------- runtime ----------
+FROM python:3.11-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH" \
+    PORT=8000 \
+    ENV=prod
+
+# libpq5 is the only system dep the asyncpg driver needs at runtime.
+# Everything else (gcc, headers, ...) lives in the builder stage and
+# stays out of the final image.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        libpq5 \
+        ca-certificates \
+        tini \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --system app \
+ && useradd --system --gid app --home /app --shell /usr/sbin/nologin app
+
+COPY --from=builder /opt/venv /opt/venv
+
+WORKDIR /app
+COPY --chown=app:app . /app
+
+# Drop privileges. The signing key file MUST be readable by uid `app`
+# (chmod 0440 + chown root:app is the recommended pattern).
+USER app
+
+EXPOSE 8000
+
+# Health check hits the public /api/health endpoint. Tuned for a
+# 30s startup window which covers DB pool warmup + JWKS fetch.
+HEALTHCHECK --interval=15s --timeout=3s --start-period=30s --retries=3 \
+    CMD python -c "import urllib.request,sys; \
+        sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2).status == 200 else sys.exit(1)"
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["uvicorn", "api.server:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--workers", "2", \
+     "--proxy-headers", \
+     "--forwarded-allow-ips", "*"]

@@ -9,6 +9,8 @@ from pathlib import Path
 from strategies.strategy_manager import StrategyManager
 from core.data_engine import fetch_stock_data, calculate_technical_indicators
 from core.config import DEFAULT_CAPITAL, MAX_POSITION_SIZE, COMMISSION_PER_TRADE, WATCHLIST
+from core.risk_manager import RiskManager
+from core.diary import get_diary
 
 
 class PaperTrader:
@@ -16,14 +18,21 @@ class PaperTrader:
     Real-time paper trading simulator.
     Fetches live prices, runs strategies, and simulates trades.
     State is persisted to JSON so you can resume sessions.
+
+    Every ``execute_buy`` / ``execute_sell`` call passes through the
+    centralized ``RiskManager``, and every action is written to the JSONL
+    diary at ``data/paper_diary.jsonl``.
     """
 
     def __init__(self, strategy_manager: StrategyManager, initial_capital: float = DEFAULT_CAPITAL,
-                 state_file: str = "data/paper_trading_state.json"):
+                 state_file: str = "data/paper_trading_state.json",
+                 risk_manager: RiskManager | None = None):
         self.manager = strategy_manager
         self.initial_capital = initial_capital
         self.state_file = state_file
         self.state = self._load_state()
+        self.risk_manager = risk_manager or RiskManager()
+        self.diary = get_diary("data/paper_diary.jsonl")
 
     def _default_state(self):
         return {
@@ -67,6 +76,39 @@ class PaperTrader:
         if not shares or shares <= 0:
             return {'error': 'Invalid share count'}
 
+        allocation_usd = shares * price
+        equity = self.get_portfolio_value()
+
+        # Centralized risk gate ----------------------------------------------------
+        proposed = {
+            'ticker': ticker,
+            'action': 'buy',
+            'allocation_usd': allocation_usd,
+            'current_price': price,
+            'sl_price': stop_loss,
+            'tp_price': target,
+        }
+        account_state = {
+            'balance': self.state['cash'],
+            'cash': self.state['cash'],
+            'total_value': equity,
+            'equity': equity,
+            'positions': self.state['positions'],
+        }
+        allowed, rejection, adjusted = self.risk_manager.validate_trade(
+            proposed, account_state, self.initial_capital
+        )
+        if not allowed:
+            self.diary.log_trade_rejected(proposed, rejection)
+            return {'error': f'Risk check rejected: {rejection}'}
+
+        # Risk manager may have capped allocation or auto-set SL.
+        allocation_usd = float(adjusted.get('allocation_usd', allocation_usd))
+        stop_loss = adjusted.get('sl_price') or stop_loss
+        shares = int(allocation_usd / price) if price > 0 else shares
+        if shares <= 0:
+            return {'error': 'Allocation too small after risk capping'}
+
         cost = shares * price + COMMISSION_PER_TRADE
         if cost > self.state['cash']:
             return {'error': f'Insufficient cash. Need ${cost:.2f}, have ${self.state["cash"]:.2f}'}
@@ -99,6 +141,7 @@ class PaperTrader:
             'reason': reason,
         }
         self.state['trade_history'].append(trade)
+        self.diary.log_trade_executed('paper', proposed, trade)
         self.save_state()
         return trade
 
@@ -133,6 +176,7 @@ class PaperTrader:
             'reason': reason,
         }
         self.state['trade_history'].append(trade)
+        self.diary.log_trade_executed('paper', {'ticker': ticker, 'action': 'sell'}, trade)
         self.save_state()
         return trade
 

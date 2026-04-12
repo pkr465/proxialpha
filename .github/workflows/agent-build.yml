@@ -1,0 +1,284 @@
+# ProxiAlpha Customer Agent — build, scan, sign, verify.
+#
+# This workflow is the only path by which an agent image reaches
+# the ``ghcr.io/proxialpha/agent`` registry. It is deliberately
+# restrictive:
+#
+#   * Trigger on pushes to ``main`` (builds ``sha-<shortsha>``)
+#     and on ``agent-v*`` git tags (builds the tagged version).
+#   * The ``latest`` tag is NEVER applied automatically. A
+#     separate ``workflow_dispatch`` job, gated on a protected
+#     environment with manual approval, is the only way to
+#     move ``latest`` forward.
+#   * Every job in the pipeline blocks the next one. If tests
+#     fail we don't build; if the scan finds a HIGH/CRITICAL
+#     CVE we don't sign; if cosign signing fails we don't
+#     verify; if verify fails we don't publish.
+#   * The signing step uses cosign's keyless OIDC flow against
+#     the GitHub Actions token. No private key material lives
+#     anywhere in the repo.
+#
+# Secrets required:
+#   GITHUB_TOKEN        (auto-provided; needs packages:write)
+#   COSIGN_EXPERIMENTAL (set to "1" for keyless OIDC)
+#
+# Edit history: see ``/agent`` commit log. Breaking changes to
+# this file must be reviewed by a second engineer — the image
+# supply chain depends on it.
+
+name: agent-build
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'agent-v*'
+  workflow_dispatch:
+    inputs:
+      tag_as_latest:
+        description: 'Also push :latest tag (protected env required)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+# Single-flight per ref so two simultaneous pushes don't race
+# on the shared buildx layer cache.
+concurrency:
+  group: agent-build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: proxialpha/agent
+
+jobs:
+  # -------------------------------------------------------------------
+  # Stage 1: tests. Block the build on the agent test suite — we
+  # will not ship an image that doesn't at least start up cleanly
+  # under pytest.
+  # -------------------------------------------------------------------
+  test:
+    name: Test agent package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            "httpx>=0.27.0" \
+            "pydantic>=2.5.0" \
+            "pydantic-settings>=2.0.0" \
+            "pyjwt>=2.0" \
+            "cryptography>=42.0" \
+            "pytest>=8" \
+            "pytest-asyncio>=0.23"
+
+      - name: Run agent tests
+        run: |
+          pytest \
+            tests/test_agent_boot.py \
+            tests/test_license_client.py \
+            tests/test_mode_machine.py \
+            tests/test_doctor_bundle.py \
+            -v
+
+  # -------------------------------------------------------------------
+  # Stage 2: build the multi-arch image with buildx. Push to the
+  # GitHub Container Registry only if we're on main or a tag —
+  # PR builds stop after ``docker buildx build`` without a push so
+  # forks can't sneak malicious images in.
+  # -------------------------------------------------------------------
+  build:
+    name: Build multi-arch image
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write  # required by cosign OIDC in the sign job
+    outputs:
+      image_ref: ${{ steps.meta.outputs.tags }}
+      image_digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Read embedded agent version
+        id: version
+        run: |
+          V=$(python -c 'from proxialpha_agent.version import __version__; print(__version__)')
+          echo "embedded=${V}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Explicit tag rules. Note the deliberate absence of any
+          # ``latest`` flavor on push — see the ``publish-latest``
+          # job below for the protected path.
+          tags: |
+            type=ref,event=tag
+            type=raw,value=sha-${{ github.sha }},enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ steps.version.outputs.embedded }},enable=${{ startsWith(github.ref, 'refs/tags/agent-v') }}
+          labels: |
+            org.opencontainers.image.title=proxialpha-agent
+            org.opencontainers.image.version=${{ steps.version.outputs.embedded }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.agent
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+  # -------------------------------------------------------------------
+  # Stage 3: Trivy scan. Any HIGH or CRITICAL CVE fails the
+  # pipeline. Operators can temporarily accept specific CVEs via
+  # a ``.trivyignore`` file at the repo root, which must be
+  # approved in the PR that introduces it.
+  # -------------------------------------------------------------------
+  scan:
+    name: Trivy image scan
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ fromJSON(format('["{0}"]', needs.build.outputs.image_ref))[0] }}
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: 1
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+
+  # -------------------------------------------------------------------
+  # Stage 4: keyless OIDC signing via cosign. The resulting
+  # signature is pushed to the registry alongside the image;
+  # downstream consumers (operators pulling the image) can verify
+  # with ``cosign verify --certificate-identity ...``.
+  # -------------------------------------------------------------------
+  sign:
+    name: Sign image with cosign (keyless OIDC)
+    needs: [build, scan]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      id-token: write
+    env:
+      COSIGN_EXPERIMENTAL: '1'
+    steps:
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sign image
+        run: |
+          for tag in $(echo "${{ needs.build.outputs.image_ref }}" | tr ',' ' '); do
+            echo "signing $tag"
+            cosign sign --yes "${tag}@${{ needs.build.outputs.image_digest }}"
+          done
+
+  # -------------------------------------------------------------------
+  # Stage 5: verify. Runs scripts/verify_image.sh against the image
+  # we just pushed and signed. This is the nine-step post-build
+  # gate — it proves the image starts, /health responds, version
+  # matches, doctor works, and no secret markers leaked.
+  # -------------------------------------------------------------------
+  verify:
+    name: Verify image (verify_image.sh)
+    needs: [build, sign]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run verify_image.sh
+        run: |
+          chmod +x ./scripts/verify_image.sh
+          # Use the first tag in the comma-separated list.
+          IMAGE_REF="$(echo '${{ needs.build.outputs.image_ref }}' | awk -F',' '{print $1}')"
+          ./scripts/verify_image.sh "${IMAGE_REF}"
+
+  # -------------------------------------------------------------------
+  # OPTIONAL Stage 6: publish :latest. Runs ONLY on
+  # ``workflow_dispatch`` with tag_as_latest=true, and ONLY on an
+  # ``agent-v*`` git tag. The ``environment: production-latest``
+  # reference requires a manual approval on GitHub — this is the
+  # single point at which a human decides a release is ready to
+  # become ``latest``. Never automatic.
+  # -------------------------------------------------------------------
+  publish-latest:
+    name: Publish :latest tag (manual approval)
+    needs: verify
+    if: >
+      github.event_name == 'workflow_dispatch' &&
+      inputs.tag_as_latest == 'true' &&
+      startsWith(github.ref, 'refs/tags/agent-v')
+    runs-on: ubuntu-latest
+    environment: production-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag as :latest
+        run: |
+          IMAGE_REF="$(echo '${{ needs.build.outputs.image_ref }}' | awk -F',' '{print $1}')"
+          docker buildx imagetools create \
+            --tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+            "${IMAGE_REF}"

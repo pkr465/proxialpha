@@ -14,19 +14,30 @@ from strategies.strategy_manager import StrategyManager
 from core.data_engine import fetch_stock_data, calculate_technical_indicators
 from core.config import (
     ALPACA_API_KEY, ALPACA_SECRET_KEY, ALPACA_BASE_URL,
-    WATCHLIST, MAX_POSITION_SIZE,
+    WATCHLIST, MAX_POSITION_SIZE, DEFAULT_CAPITAL,
 )
+from core.risk_manager import RiskManager
+from core.diary import get_diary
 
 
 class AlpacaLiveTrader:
     """
     Live trading bot using Alpaca Markets API.
     Modular design allows Claude to adjust strategies mid-session.
+
+    Implements ``BrokerProtocol`` (see live_trading/broker_protocol.py).
+    Every trade is pre-validated by the centralized ``RiskManager`` and
+    written to ``data/live_diary.jsonl`` for post-mortem debugging.
     """
+
+    name = "alpaca"
+    asset_classes = ["equity"]
 
     def __init__(self, strategy_manager: StrategyManager,
                  api_key: str = None, secret_key: str = None,
-                 base_url: str = None, max_daily_trades: int = 10):
+                 base_url: str = None, max_daily_trades: int = 10,
+                 risk_manager: RiskManager | None = None,
+                 initial_capital: float = DEFAULT_CAPITAL):
         self.manager = strategy_manager
         self.api_key = api_key or ALPACA_API_KEY
         self.secret_key = secret_key or ALPACA_SECRET_KEY
@@ -35,6 +46,9 @@ class AlpacaLiveTrader:
         self.daily_trade_count = 0
         self.trade_log = []
         self._api = None
+        self.risk_manager = risk_manager or RiskManager()
+        self.initial_capital = initial_capital
+        self.diary = get_diary("data/live_diary.jsonl")
 
     def _init_api(self):
         """Lazy init Alpaca API client."""
@@ -124,6 +138,35 @@ class AlpacaLiveTrader:
         except Exception as e:
             return {'error': str(e)}
 
+    def close_position(self, ticker: str) -> dict:
+        """BrokerProtocol: flatten a position. Market-sells the entire holding."""
+        positions = {p['ticker']: p for p in self.get_positions()}
+        pos = positions.get(ticker)
+        if not pos:
+            return {'status': 'no_position', 'ticker': ticker, 'broker': self.name}
+        return self.submit_order(ticker, int(abs(pos['shares'])), 'sell')
+
+    def get_candles(self, ticker: str, interval: str = '1d',
+                    limit: int = 200) -> list[dict]:
+        """BrokerProtocol: fetch OHLCV candles via yfinance (ProxiAlpha default)."""
+        period_map = {'1d': '1y', '1h': '1mo', '5m': '5d'}
+        period = period_map.get(interval, '1y')
+        df = fetch_stock_data(ticker, period=period)
+        if df is None or df.empty:
+            return []
+        df = df.tail(limit)
+        candles = []
+        for ts, row in df.iterrows():
+            candles.append({
+                't': ts.isoformat() if hasattr(ts, 'isoformat') else str(ts),
+                'open': float(row.get('Open', 0)),
+                'high': float(row.get('High', 0)),
+                'low': float(row.get('Low', 0)),
+                'close': float(row.get('Close', 0)),
+                'volume': float(row.get('Volume', 0)),
+            })
+        return candles
+
     def submit_bracket_order(self, ticker: str, qty: int, side: str = 'buy',
                               take_profit: float = None, stop_loss: float = None) -> dict:
         """Submit a bracket order (entry + take profit + stop loss)."""
@@ -190,19 +233,51 @@ class AlpacaLiveTrader:
                 amount = equity * size_pct
                 qty = int(amount / price)
 
+                # Centralized risk gate ----------------------------------------
+                proposed = {
+                    'ticker': ticker,
+                    'action': 'buy',
+                    'allocation_usd': amount,
+                    'current_price': price,
+                    'sl_price': consensus.get('stop_loss'),
+                    'tp_price': consensus.get('target_price'),
+                }
+                account_state = {
+                    'balance': account.get('cash', 0),
+                    'cash': account.get('cash', 0),
+                    'total_value': equity,
+                    'equity': equity,
+                    'positions': list(current_positions.values()),
+                }
+                allowed, rejection, adjusted = self.risk_manager.validate_trade(
+                    proposed, account_state, self.initial_capital
+                )
+                if not allowed:
+                    self.diary.log_trade_rejected(proposed, rejection)
+                    results.append({
+                        'ticker': ticker, 'signal': signal, 'confidence': confidence,
+                        'price': price, 'qty': 0, 'amount': 0,
+                        'rejected': rejection,
+                    })
+                    continue
+
+                amount = float(adjusted.get('allocation_usd', amount))
+                qty = int(amount / price) if price > 0 else 0
+                stop = adjusted.get('sl_price') or consensus.get('stop_loss')
+                target = consensus.get('target_price')
+
                 if qty > 0 and auto_execute:
-                    target = consensus.get('target_price')
-                    stop = consensus.get('stop_loss')
+                    self.diary.log_trade_submitted(self.name, proposed)
                     if target and stop:
                         action = self.submit_bracket_order(ticker, qty, 'buy', target, stop)
                     else:
                         action = self.submit_order(ticker, qty, 'buy')
+                    self.diary.log_trade_executed(self.name, proposed, action or {})
 
                 results.append({
                     'ticker': ticker, 'signal': signal, 'confidence': confidence,
                     'price': price, 'qty': qty, 'amount': round(amount, 2),
-                    'executed': action, 'target': consensus.get('target_price'),
-                    'stop': consensus.get('stop_loss'),
+                    'executed': action, 'target': target, 'stop': stop,
                 })
 
             elif signal in ('SELL', 'STRONG_SELL') and ticker in current_positions:

@@ -13,6 +13,22 @@ anthropic:
   temperature: 0.3                 # Low temp for consistent signals
   timeout_seconds: 30
 
+# ---- DECISION MAKER (tool-calling loop) ----
+# Read by core/ai_decision_maker.AIDecisionMaker.
+# This is the production-grade Claude tool-calling pattern ported from
+# hyperliquid-trading-agent. It enables Claude to call `fetch_indicator`
+# mid-inference for fresh technical data, uses a Haiku sanitizer for
+# malformed JSON, and enforces low-churn / cooldown_bars hysteresis.
+decision_maker:
+  enabled: false                         # Turn on once API key is set and paper tested
+  model: "claude-sonnet-4-6"
+  sanitize_model: "claude-haiku-4-5-20251001"
+  max_tokens: 4096
+  enable_tools: true                     # Enable the fetch_indicator tool
+  cooldown_bars: 3                       # Minimum bars between decision flips
+  require_htf_confirmation: true         # Higher-timeframe must agree to flip
+  llm_log_path: "data/llm_requests.log"
+
 # ---- CLAUDE INTEGRATION MODES ----
 integration_modes:
   # Mode 1: Signal Generation
